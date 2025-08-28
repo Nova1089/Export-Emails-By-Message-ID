@@ -11,7 +11,7 @@ function Initialize-ColorScheme
 
 function Show-Introduction
 {
-    Write-Host "This script does some stuff..." -ForegroundColor $infoColor
+    Write-Host "This script downloads a list of emails via their internet message ID..." -ForegroundColor $infoColor
     Read-Host "Press Enter to continue"
 }
 
@@ -98,9 +98,9 @@ function Test-ConnectedToMgGraph
     return $null -ne (Get-MgContext)
 }
 
-function PromptFor-MessageIdList
+function PromptFor-EmailList
 {
-    Write-Host "Script requires CSV list of message IDs. Must include a header named `"Message ID`"." -ForegroundColor $infoColor
+    Write-Host "Script requires CSV list of internet message IDs. Must include headers named `"Mailbox Address`", and `"Internet Message ID`"." -ForegroundColor $infoColor
     $csvPath = Read-Host "Enter path to CSV (must be .csv)"
     $csvPath = $csvPath.Trim('"')
     return Import-Csv -Path $csvPath
@@ -111,9 +111,15 @@ function Confirm-CSVHasCorrectHeaders($importedCSV)
     $firstRecord = $importedCSV | Select-Object -First 1
     $validCSV = $true
 
-    if (-not($firstRecord | Get-Member -MemberType NoteProperty -Name "Message ID"))
+    if (-not($firstRecord | Get-Member -MemberType NoteProperty -Name "Internet Message ID"))
     {
-        Write-Host "This CSV file is missing a header called `"Message ID`"." -ForegroundColor $failColor
+        Write-Host "This CSV file is missing a header called `"Internet Message ID`"." -ForegroundColor $failColor
+        $validCSV = $false
+    }
+
+    if (-not($firstRecord | Get-Member -MemberType NoteProperty -Name "Mailbox Address"))
+    {
+        Write-Host "This CSV file is missing a header called `"Mailbox Address`"." -ForegroundColor $failColor
         $validCSV = $false
     }
 
@@ -125,18 +131,55 @@ function Confirm-CSVHasCorrectHeaders($importedCSV)
     }
 }
 
-function Download-Email($mailboxAddress, $messageId)
+function Download-AllEmails($emailList)
 {
-    $uri = "https://graph.microsoft.com/v1.0/users/$mailboxAddress/messages/$messageId/$value"
-    $mailboxAddressModified = $mailboxAddress.Replace('@', '_').Replace('.', '_')
-    $filePath = "$PSScriptRoot\"
+    $i = 1
+    foreach ($email in $emailList)
+    {
+        Write-Progress -Activity "Downloading emails..." -Status $i
+        $emailContent = Get-Email -MailboxAddress $email.'Mailbox Address' -InternetMessageId $email.'Internet Message ID'
+        Download-Email -MailboxAddress $email.'Mailbox Address' -MessageId $emailContent.id -InternetMessageId $email.'Internet Message ID'
+        $i++
+    }
+}
+
+function Get-Email($mailboxAddress, $internetMessageId)
+{
+    # https://learn.microsoft.com/en-us/graph/api/user-list-messages
+    $uri = "https://graph.microsoft.com/v1.0/users/$mailboxAddress/messages?`$filter=internetMessageId eq '$internetMessageId'"
     try
     {
-        Invoke-MgGraphRequest -Method "Get" -Uri $uri
+        $email = Invoke-MgGraphRequest -Method "Get" -Uri $uri
+    }
+    catch
+    {
+        $errorRecord = $_
+        Log-Warning "An error occurred when getting email. `nMailbox address: $mailboxAddress `nInternet Message Id: $internetMessageId `n$errorRecord"
+    }
+    return $email.value
+}
+
+function Log-Warning($message, $logPath = ".\logs.txt")
+{
+    $message = "[$(Get-Date -Format 'yyyy-MM-dd hh:mm tt') W] $message"
+    Write-Output $message | Tee-Object -FilePath $logPath -Append | Write-Host -ForegroundColor $warningColor
+}
+
+function Download-Email($mailboxAddress, $messageId, $internetMessageId)
+{
+    # https://learn.microsoft.com/en-us/graph/outlook-get-mime-message
+    $uri = "https://graph.microsoft.com/v1.0/users/$mailboxAddress/messages/$messageId/`$value"
+    $mailboxAddressModified = $mailboxAddress.Replace('@', '_').Replace('.', '_')
+    $internetMessageIdModified = $internetMessageId.Replace('<', '').Replace('>', '')
+    $filePath = "$PSScriptRoot\$($mailboxAddressModified)_$internetMessageIdModified.eml"
+    try
+    {
+        Invoke-MgGraphRequest -Method "Get" -Uri $uri -OutputFilePath $filePath
     }    
     catch
     {
-
+        $errorRecord = $_
+        Log-Warning "An error occurred when downloading email. Mailbox address: $mailboxAddress MessageId: $internetMessageId `n$errorRecord"
     }
 }
 
@@ -145,15 +188,17 @@ Initialize-ColorScheme
 Show-Introduction
 Use-Module "Microsoft.Graph.Authentication"
 TryConnect-MgGraph
-$messageIdList = PromptFor-MessageIdList
-Confirm-CSVHasCorrectHeaders $messageIdList
+$emailList = PromptFor-EmailList
+Confirm-CSVHasCorrectHeaders $emailList
+Download-AllEmails $emailList
 Write-Host "All done!" -ForegroundColor $successColor
 Read-Host "Press Enter to exit"
 
+# Should script be updated to provide option to forward them to a specific mailbox instead of (or in addition to) downloading them?
 
-# Get CSV files with message IDs
-# Export those emails
-# Provide option to forward them to a specific mailbox?
-
-
-$testMessageId = "<CYXPR20MB6950F77932F21F28DC53932EF138A@CYXPR20MB6950.namprd20.prod.outlook.com>"
+<#
+Useful articles:
+https://learn.microsoft.com/en-us/graph/outlook-get-mime-message
+https://learn.microsoft.com/en-us/graph/api/message-get
+https://learn.microsoft.com/en-us/graph/api/user-list-messages
+#>
